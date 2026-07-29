@@ -31,7 +31,7 @@ def create_vad() -> VAD:
     from livekit.plugins import silero
 
     logger.info("VAD initialized: Silero (local)")
-    return silero.VAD()
+    return silero.VAD.load()
 
 
 def create_stt(config: STTConfig) -> STT:
@@ -143,10 +143,14 @@ def create_tts(config: TTSConfig) -> TTS:
                 "Install with: pip install livekit-plugins-google"
             )
 
+    elif backend in ("pyttsx3", "local", "offline"):
+        logger.info("TTS initialized: Local pyttsx3 (offline)")
+        return None
+
     else:
         raise ValueError(
             f"Unsupported TTS backend: {backend}. "
-            f"Supported options: cartesia, elevenlabs, openai, google"
+            f"Supported options: cartesia, elevenlabs, openai, google, pyttsx3"
         )
 
 

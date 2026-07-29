@@ -106,6 +106,9 @@ def start_worker() -> None:
     # Suppress noisy LiveKit logs
     logging.getLogger("livekit").setLevel(logging.WARNING)
 
+    import sys
+    sys.argv = [sys.argv[0], "start"]
+
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,

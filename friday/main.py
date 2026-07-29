@@ -53,12 +53,28 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable wake word detection ('Friday')",
     )
+    parser.add_argument(
+        "--text",
+        "-t",
+        action="store_true",
+        help="Start in text-only mode",
+    )
+    parser.add_argument(
+        "--worker",
+        action="store_true",
+        help="Run as a LiveKit worker",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Main entry point. Parses arguments and launches the assistant."""
     args = parse_args()
+
+    if args.text:
+        args.mode = "text"
+    elif args.worker:
+        args.mode = "worker"
 
     if args.mode == "worker":
         # ── LiveKit Worker Mode ────────────────────────────────────────

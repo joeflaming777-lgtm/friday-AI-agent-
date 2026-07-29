@@ -560,8 +560,7 @@ class VoicePipeline:
                 self._on_friday_message(response_text)
 
             # Step 3: Speak the response
-            if self._tts is not None and self._playback is not None:
-                await self._speak(response_text)
+            await self._speak(response_text)
 
         except asyncio.CancelledError:
             logger.debug("Speech processing cancelled")
@@ -605,23 +604,38 @@ class VoicePipeline:
         Args:
             text: Text to speak.
         """
-        assert self._tts is not None
-        assert self._playback is not None
+        spoken = False
+        if self._tts is not None and self._playback is not None:
+            try:
+                async for frame in self._tts.synthesize(text):
+                    # Check if interrupted
+                    if (
+                        self._state.is_speaking
+                        or self._state.should_stop
+                    ):
+                        self._playback.clear()
+                        break
 
-        try:
-            async for frame in self._tts.synthesize(text):
-                # Check if interrupted
-                if (
-                    self._state.is_speaking
-                    or self._state.should_stop
-                ):
-                    self._playback.clear()
-                    break
+                    self._playback.play_frame(frame)
+                    spoken = True
 
-                self._playback.play_frame(frame)
+            except Exception as exc:
+                logger.error(f"Cloud TTS synthesis error: {exc}")
 
-        except Exception as exc:
-            logger.error(f"TTS synthesis error: {exc}")
+        if not spoken:
+            logger.info("Speaking via local pyttsx3 voice engine...")
+            loop = asyncio.get_event_loop()
+
+            def _say() -> None:
+                try:
+                    import pyttsx3
+                    engine = pyttsx3.init()
+                    engine.say(text)
+                    engine.runAndWait()
+                except Exception as e:
+                    logger.error(f"pyttsx3 speech error: {e}")
+
+            await loop.run_in_executor(None, _say)
 
     # ── Properties ──────────────────────────────────────────────────────
 
