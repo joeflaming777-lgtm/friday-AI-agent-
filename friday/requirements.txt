@@ -2,12 +2,17 @@
 # Friday AI Assistant - Dependencies
 # =============================================================================
 # Core
-livekit-agents>=0.12.0
+livekit-agents>=1.0.0
 python-dotenv>=1.0.0
 rich>=13.0.0
+httpx>=0.27.0
 
 # LLM
-google-generativeai>=0.8.0
+# Primary path: Gemini REST API via httpx (used in local voice/text mode).
+httpx>=0.27.0
+# Worker mode (python main.py --worker) still uses the SDK via the LiveKit
+# adapter. Only needed if you run Friday as a LiveKit worker.
+# google-generativeai>=0.8.0
 
 # Voice Activity Detection
 livekit-plugins-silero>=0.12.0

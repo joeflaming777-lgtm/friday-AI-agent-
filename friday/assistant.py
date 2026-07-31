@@ -60,7 +60,10 @@ class FridayAssistant:
         self._running: bool = False
 
         # Initialize Gemini service
-        self.gemini: GeminiService = GeminiService(self.config.gemini)
+        self.gemini: GeminiService = GeminiService(
+            self.config.gemini,
+            verify=self.config.ssl.verify,
+        )
 
         # Voice pipeline (voice mode only)
         self.pipeline: VoicePipeline | None = None
@@ -105,6 +108,9 @@ class FridayAssistant:
         if self.pipeline is not None:
             await self.pipeline.stop()
 
+        # Close the Gemini HTTP client
+        await self.gemini.close()
+
         logger.print_success("Friday has been shut down. Goodbye Boss!")
 
     # ── Signal Handling ─────────────────────────────────────────────────────
@@ -146,6 +152,13 @@ class FridayAssistant:
 
             await self.pipeline.start()
             logger.print_success("Connected and listening")
+            logger.print_listening()
+
+            # Greet the user so they know Friday is awake
+            await self.pipeline.say(
+                "Hello Boss, Friday at your service. "
+                "Go ahead, ask me anything."
+            )
             logger.print_listening()
 
             # Keep running until shutdown

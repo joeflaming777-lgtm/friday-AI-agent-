@@ -110,11 +110,20 @@ def main() -> None:
     # Run the assistant
     try:
         from assistant import FridayAssistant
+        from livekit.agents.utils import http_context
 
         assistant = FridayAssistant(mode=args.mode)
         if args.wake_word:
             assistant.enable_wake_word()
-        asyncio.run(assistant.run())
+
+        async def _run() -> None:
+            # Standalone STT/TTS plugins (Deepgram, Cartesia, ...) need a
+            # shared aiohttp session, which normally only exists inside the
+            # LiveKit worker. Opening it here makes them work in local mode.
+            async with http_context.open():
+                await assistant.run()
+
+        asyncio.run(_run())
 
     except KeyboardInterrupt:
         print("\nGoodbye Boss!")

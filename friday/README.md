@@ -307,13 +307,18 @@ Memory is stored in-memory and resets when you restart the assistant.
 | **"No module named 'sounddevice'"** | Install audio dependencies: `pip install sounddevice numpy` |
 | **"No audio devices found"** | Check your microphone is connected. Run `python -c "import sounddevice; print(sounddevice.query_devices())"` |
 | **"Missing required environment variable"** | Ensure `.env` exists and has all required API keys |
+| **`SSL: CERTIFICATE_VERIFY_FAILED`** | Antivirus software (e.g. AVG "Web Shield") re-signs HTTPS traffic with a root CA Python's OpenSSL rejects. Set `FRIDAY_SSL_VERIFY=false` in `.env`. |
+| **`Attempted to use an http session outside of a job context`** | LiveKit plugins need a shared aiohttp session outside the worker. `main.py` opens one automatically; don't call the pipeline from a bare script without it. |
 | **Gemini API errors** | Check your `GOOGLE_API_KEY` is valid. Verify internet connection |
 | **Deepgram STT errors** | Check `DEEPGRAM_API_KEY` and internet connection |
 | **Cartesia TTS errors** | Check `CARTESIA_API_KEY` and internet connection |
 | **LiveKit connection errors** | Verify `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` |
 | **Microphone not working** | Check OS microphone permissions. Try text mode: `python main.py --text` |
+| **Friday keeps interrupting herself** | Acoustic echo — the mic hears the speakers. Use headphones. A short echo-guard delay is already built in. |
 | **Audio crackling/pops** | Try adjusting `block_size` in `voice_pipeline.py` |
 | **High latency** | Use faster models: set `GEMINI_MODEL=gemini-2.0-flash-lite` |
+
+> **Note for LiveKit version:** this project targets `livekit-agents` v1.x (the APIs changed significantly from v0.x). Make sure you have at least 1.0: `pip install "livekit-agents>=1.0"`.
 
 ---
 

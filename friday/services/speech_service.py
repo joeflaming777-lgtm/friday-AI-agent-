@@ -8,8 +8,10 @@ Supports multiple backends with a consistent interface.
 
 from __future__ import annotations
 
+import ssl
 from typing import Any
 
+import aiohttp
 from livekit.agents.stt import STT
 from livekit.agents.tts import TTS
 from livekit.agents.vad import VAD
@@ -18,6 +20,30 @@ from config import STTConfig, TTSConfig
 from logger import get_logger
 
 logger = get_logger("friday.speech")
+
+
+def build_http_session(*, verify: bool = True) -> aiohttp.ClientSession:
+    """Create an aiohttp session shared by the STT/TTS plugins.
+
+    When ``verify`` is False (see ``FRIDAY_SSL_VERIFY``), certificate
+    verification is disabled for the session. This is needed on machines
+    where antivirus software (e.g. AVG "Web Shield") re-signs HTTPS
+    traffic with a root CA that Python's OpenSSL rejects.
+
+    Args:
+        verify: Whether to verify TLS certificates.
+
+    Returns:
+        A ready-to-use aiohttp.ClientSession.
+    """
+    ssl_ctx: ssl.SSLContext | None = None
+    if not verify:
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+    return aiohttp.ClientSession(connector=connector)
 
 
 def create_vad() -> VAD:
@@ -34,11 +60,17 @@ def create_vad() -> VAD:
     return silero.VAD.load()
 
 
-def create_stt(config: STTConfig) -> STT:
+def create_stt(
+    config: STTConfig,
+    *,
+    http_session: aiohttp.ClientSession | None = None,
+) -> STT:
     """Create a Speech-to-Text instance based on configuration.
 
     Args:
         config: STT configuration specifying backend and API keys.
+        http_session: Optional shared aiohttp session to use for API
+            calls. If not provided, the plugin creates its own.
 
     Returns:
         Configured STT instance.
@@ -58,7 +90,7 @@ def create_stt(config: STTConfig) -> STT:
         from livekit.plugins import deepgram
 
         logger.info("STT initialized: Deepgram")
-        return deepgram.STT(api_key=config.deepgram_api_key)
+        return deepgram.STT(api_key=config.deepgram_api_key, http_session=http_session)
 
     elif backend == "google":
         # Uses Google Cloud Speech-to-Text
@@ -67,7 +99,7 @@ def create_stt(config: STTConfig) -> STT:
             from livekit.plugins import google
 
             logger.info("STT initialized: Google Cloud Speech-to-Text")
-            return google.stt.STT()
+            return google.stt.STT(http_session=http_session)
         except ImportError:
             raise ValueError(
                 "Google STT requires livekit-plugins-google package.\n"
@@ -82,14 +114,21 @@ def create_stt(config: STTConfig) -> STT:
         )
 
 
-def create_tts(config: TTSConfig) -> TTS:
+def create_tts(
+    config: TTSConfig,
+    *,
+    http_session: aiohttp.ClientSession | None = None,
+) -> TTS | None:
     """Create a Text-to-Speech instance based on configuration.
 
     Args:
         config: TTS configuration specifying backend and API keys.
+        http_session: Optional shared aiohttp session to use for API
+            calls. If not provided, the plugin creates its own.
 
     Returns:
-        Configured TTS instance.
+        Configured TTS instance, or None for a local backend
+        (pyttsx3), which is spoken directly without an API.
 
     Raises:
         ValueError: If the specified backend is unsupported or
@@ -106,7 +145,9 @@ def create_tts(config: TTSConfig) -> TTS:
         from livekit.plugins import cartesia
 
         logger.info("TTS initialized: Cartesia")
-        return cartesia.TTS(api_key=config.cartesia_api_key)
+        return cartesia.TTS(
+            api_key=config.cartesia_api_key, http_session=http_session
+        )
 
     elif backend == "elevenlabs":
         if not config.elevenlabs_api_key:
@@ -117,7 +158,9 @@ def create_tts(config: TTSConfig) -> TTS:
         from livekit.plugins import elevenlabs
 
         logger.info("TTS initialized: ElevenLabs")
-        return elevenlabs.TTS(api_key=config.elevenlabs_api_key)
+        return elevenlabs.TTS(
+            api_key=config.elevenlabs_api_key, http_session=http_session
+        )
 
     elif backend == "openai":
         if not config.openai_api_key:
@@ -128,7 +171,7 @@ def create_tts(config: TTSConfig) -> TTS:
         from livekit.plugins import openai
 
         logger.info("TTS initialized: OpenAI TTS")
-        return openai.TTS(api_key=config.openai_api_key)
+        return openai.TTS(api_key=config.openai_api_key, http_session=http_session)
 
     elif backend == "google":
         # Uses Google Cloud Text-to-Speech
@@ -136,7 +179,7 @@ def create_tts(config: TTSConfig) -> TTS:
             from livekit.plugins import google
 
             logger.info("TTS initialized: Google Cloud Text-to-Speech")
-            return google.tts.TTS()
+            return google.tts.TTS(http_session=http_session)
         except ImportError:
             raise ValueError(
                 "Google TTS requires livekit-plugins-google package.\n"

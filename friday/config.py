@@ -85,6 +85,22 @@ class TTSConfig:
 
 
 @dataclass(frozen=True)
+class SSLConfig:
+    """TLS certificate verification settings.
+
+    Some machines (e.g. with AVG/Avast "Web Shield" TLS interception)
+    serve re-signed certificates that Python's OpenSSL rejects. Set
+    ``FRIDAY_SSL_VERIFY=false`` to disable certificate verification for
+    the STT/TTS/LLM API calls so the assistant can still work.
+    """
+
+    verify: bool = field(
+        default_factory=lambda: _optional_env("FRIDAY_SSL_VERIFY", "true").lower()
+        in ("1", "true", "yes")
+    )
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Top-level application configuration."""
 
@@ -92,6 +108,7 @@ class AppConfig:
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     stt: STTConfig = field(default_factory=STTConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
+    ssl: SSLConfig = field(default_factory=SSLConfig)
     log_level: str = field(default_factory=lambda: _optional_env("LOG_LEVEL", "INFO"))
     sample_rate: int = 16000
     channels: int = 1
