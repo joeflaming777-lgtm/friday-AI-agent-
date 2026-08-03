@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from browser_tools import extract_and_execute_browser_actions
 from config import GeminiConfig
 from logger import get_logger
 from prompts import SYSTEM_PROMPT
@@ -95,6 +96,8 @@ class GeminiService:
 
         self._raise_if_error(data)
         response_text = self._extract_text(data).strip()
+        # Execute any browser actions embedded in the response
+        response_text, _ = extract_and_execute_browser_actions(response_text)
         self.history.append({"role": "model", "parts": [{"text": response_text}]})
         logger.info("Gemini response received")
         return response_text
@@ -105,17 +108,26 @@ class GeminiService:
         Yields text chunks as they are received from the API, and stores
         the complete response in conversation history.
 
+        [OPEN_BROWSER: ...] action tags are stripped from yielded chunks
+        so TTS never reads them aloud; the actions are executed once the
+        full response has been assembled.
+
         Args:
             text: The user's message text.
 
         Yields:
-            Text chunks from the streaming response.
+            Text chunks from the streaming response (tags stripped).
         """
+        import re as _re
+        _TAG_RE = _re.compile(r"\[OPEN_BROWSER:[^\]]*\]", _re.IGNORECASE)
+
         self.history.append({"role": "user", "parts": [{"text": text}]})
         url = self._endpoint("streamGenerateContent", stream=True)
 
         full_response: list[str] = []
         completed = False
+        # Buffer for partial tag that spans chunk boundaries
+        partial_tag_buf: str = ""
 
         try:
             async with self._client.stream(
@@ -132,7 +144,26 @@ class GeminiService:
                     chunk_text = self._extract_text(data)
                     if chunk_text:
                         full_response.append(chunk_text)
-                        yield chunk_text
+                        # Strip any complete [OPEN_BROWSER:...] tags from the
+                        # chunk before yielding so TTS never speaks them.
+                        combined = partial_tag_buf + chunk_text
+                        # Remove complete tags
+                        cleaned_chunk = _TAG_RE.sub("", combined)
+                        # Detect if we have a partial opening tag at the end
+                        partial_start = cleaned_chunk.rfind("[")
+                        if partial_start != -1 and "]" not in cleaned_chunk[partial_start:]:
+                            # Might be an incomplete tag — hold it back
+                            partial_tag_buf = cleaned_chunk[partial_start:]
+                            cleaned_chunk = cleaned_chunk[:partial_start]
+                        else:
+                            partial_tag_buf = ""
+                        if cleaned_chunk:
+                            yield cleaned_chunk
+            # Yield any remaining buffer content (strip any leftover partial tag)
+            if partial_tag_buf:
+                leftover = _TAG_RE.sub("", partial_tag_buf).strip()
+                if leftover:
+                    yield leftover
             completed = True
         except httpx.HTTPError as exc:
             logger.error(f"Gemini streaming error: {exc}")
@@ -145,6 +176,8 @@ class GeminiService:
 
         if completed:
             complete = "".join(full_response)
+            # Execute any browser actions embedded in the full response
+            complete, _ = extract_and_execute_browser_actions(complete)
             self.history.append({"role": "model", "parts": [{"text": complete}]})
             logger.info("Gemini streaming response complete")
 
