@@ -139,6 +139,79 @@ _ACTION_PATTERN = re.compile(
 )
 
 
+
+# ── Local Command Interceptor ────────────────────────────────────────────────
+
+# Patterns for local browser command parsing (no Gemini needed)
+_OPEN_PATTERNS = [
+    # "open YouTube", "launch Spotify", "go to GitHub"
+    r"(?:open|launch|go\s+to|start|load)\s+(.+)",
+    # "play X on YouTube"
+    r"play\s+(.+?)\s+on\s+youtube",
+    # "search YouTube for X" / "search Google for X"
+    r"search\s+(?:youtube|yt)\s+for\s+(.+)",
+    r"search\s+google\s+for\s+(.+)",
+    r"google\s+(.+)",
+]
+
+_COMPILED_PATTERNS = [
+    (re.compile(p, re.IGNORECASE), i) for i, p in enumerate(_OPEN_PATTERNS)
+]
+
+
+def handle_local_browser_command(text: str) -> str | None:
+    """Try to handle a browser-related spoken command locally.
+
+    If the text matches a known "open / play / search" pattern, executes
+    the action immediately without calling Gemini and returns a spoken
+    confirmation. Returns None if no pattern matches (caller should fall
+    through to Gemini).
+
+    Args:
+        text: Transcribed user speech.
+
+    Returns:
+        A spoken confirmation string, or None if not a browser command.
+    """
+    text = text.strip().rstrip(".!?,")
+
+    for pattern, idx in _COMPILED_PATTERNS:
+        m = pattern.search(text)
+        if not m:
+            continue
+        target = m.group(1).strip().rstrip(".!?,")
+
+        # "play X on YouTube" (idx 1) → YouTube search
+        if idx == 1:
+            return play_on_youtube(target)
+
+        # "search YouTube for X" (idx 2) → YouTube search
+        if idx == 2:
+            return play_on_youtube(target)
+
+        # "search Google for X" / "google X" (idx 3/4) → Google search
+        if idx in (3, 4):
+            return google_search(target)
+
+        # "open / launch / go to X" (idx 0) — check if it's a known site
+        key = target.lower()
+        if key in _SITE_MAP:
+            return open_site(target)
+
+        # If it looks like a URL, open it directly
+        if key.startswith(("http://", "https://", "www.")):
+            return open_url(target)
+
+        # Check if target ends with a known TLD — treat as URL
+        if re.search(r"\.\w{2,}$", key):
+            return open_url(target)
+
+        # Unknown site — open with Google search as fallback
+        return open_site(target)
+
+    return None  # Not a local browser command
+
+
 def extract_and_execute_browser_actions(text: str) -> tuple[str, list[str]]:
     """Scan response text for [OPEN_BROWSER: ...] tags and execute them.
 

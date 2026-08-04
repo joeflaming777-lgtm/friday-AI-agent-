@@ -12,6 +12,7 @@ software re-signs HTTPS traffic with a root CA that OpenSSL rejects.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -27,6 +28,10 @@ logger = get_logger("friday.gemini")
 
 _API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _DEFAULT_TIMEOUT = httpx.Timeout(60.0, connect=15.0, read=120.0)
+
+# Retry settings for 429 rate-limit responses
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 5.0  # seconds (doubles each retry: 5s, 10s, 20s)
 
 
 class GeminiService:
@@ -71,7 +76,8 @@ class GeminiService:
     async def send_message(self, text: str) -> str:
         """Send a message and receive a complete response.
 
-        Maintains conversation history for context.
+        Automatically retries up to _MAX_RETRIES times on 429 rate-limit
+        errors with exponential backoff.
 
         Args:
             text: The user's message text.
@@ -80,19 +86,34 @@ class GeminiService:
             The model's response text.
 
         Raises:
-            RuntimeError: If the Gemini API call fails.
+            RuntimeError: If the Gemini API call fails after all retries.
         """
         self.history.append({"role": "user", "parts": [{"text": text}]})
         url = self._endpoint("generateContent")
 
-        try:
-            response = await self._client.post(url, json=self._build_payload())
-            response.raise_for_status()
-            data = response.json()
-        except (httpx.HTTPError, json.JSONDecodeError) as exc:
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                response = await self._client.post(url, json=self._build_payload())
+                if response.status_code == 429 and attempt < _MAX_RETRIES:
+                    delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning(f"Rate limited (429). Retrying in {delay:.0f}s... (attempt {attempt + 1}/{_MAX_RETRIES})")
+                    await asyncio.sleep(delay)
+                    continue
+                response.raise_for_status()
+                data = response.json()
+                break
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                if attempt < _MAX_RETRIES and "429" in str(exc):
+                    delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning(f"Rate limited. Retrying in {delay:.0f}s...")
+                    await asyncio.sleep(delay)
+                    continue
+                self.history.pop()
+                logger.error(f"Gemini API error: {exc}")
+                raise RuntimeError(f"Gemini API request failed: {exc}") from exc
+        else:
             self.history.pop()
-            logger.error(f"Gemini API error: {exc}")
-            raise RuntimeError(f"Gemini API request failed: {exc}") from exc
+            raise RuntimeError("Gemini API rate limit exceeded after all retries")
 
         self._raise_if_error(data)
         response_text = self._extract_text(data).strip()
@@ -126,57 +147,71 @@ class GeminiService:
 
         full_response: list[str] = []
         completed = False
-        # Buffer for partial tag that spans chunk boundaries
         partial_tag_buf: str = ""
 
-        try:
-            async with self._client.stream(
-                "POST", url, json=self._build_payload()
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    try:
-                        data = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
-                    chunk_text = self._extract_text(data)
-                    if chunk_text:
-                        full_response.append(chunk_text)
-                        # Strip any complete [OPEN_BROWSER:...] tags from the
-                        # chunk before yielding so TTS never speaks them.
-                        combined = partial_tag_buf + chunk_text
-                        # Remove complete tags
-                        cleaned_chunk = _TAG_RE.sub("", combined)
-                        # Detect if we have a partial opening tag at the end
-                        partial_start = cleaned_chunk.rfind("[")
-                        if partial_start != -1 and "]" not in cleaned_chunk[partial_start:]:
-                            # Might be an incomplete tag — hold it back
-                            partial_tag_buf = cleaned_chunk[partial_start:]
-                            cleaned_chunk = cleaned_chunk[:partial_start]
+        for attempt in range(_MAX_RETRIES + 1):
+            full_response = []
+            partial_tag_buf = ""
+            completed = False
+            try:
+                async with self._client.stream(
+                    "POST", url, json=self._build_payload()
+                ) as response:
+                    if response.status_code == 429:
+                        if attempt < _MAX_RETRIES:
+                            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                            logger.warning(
+                                f"Rate limited (429). Retrying stream in {delay:.0f}s... "
+                                f"(attempt {attempt + 1}/{_MAX_RETRIES})"
+                            )
+                            await asyncio.sleep(delay)
+                            continue
                         else:
-                            partial_tag_buf = ""
-                        if cleaned_chunk:
-                            yield cleaned_chunk
-            # Yield any remaining buffer content (strip any leftover partial tag)
-            if partial_tag_buf:
-                leftover = _TAG_RE.sub("", partial_tag_buf).strip()
-                if leftover:
-                    yield leftover
-            completed = True
-        except httpx.HTTPError as exc:
-            logger.error(f"Gemini streaming error: {exc}")
-            raise RuntimeError(f"Gemini API request failed: {exc}") from exc
-        finally:
-            # If the stream was interrupted (error or caller stopped early),
-            # drop the unanswered user message so history stays consistent.
-            if not completed and self.history and self.history[-1]["role"] == "user":
-                self.history.pop()
+                            raise RuntimeError("Gemini API rate limit exceeded after all retries")
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+                        chunk_text = self._extract_text(data)
+                        if chunk_text:
+                            full_response.append(chunk_text)
+                            combined = partial_tag_buf + chunk_text
+                            cleaned_chunk = _TAG_RE.sub("", combined)
+                            partial_start = cleaned_chunk.rfind("[")
+                            if partial_start != -1 and "]" not in cleaned_chunk[partial_start:]:
+                                partial_tag_buf = cleaned_chunk[partial_start:]
+                                cleaned_chunk = cleaned_chunk[:partial_start]
+                            else:
+                                partial_tag_buf = ""
+                            if cleaned_chunk:
+                                yield cleaned_chunk
+                # Yield any remaining buffer content
+                if partial_tag_buf:
+                    leftover = _TAG_RE.sub("", partial_tag_buf).strip()
+                    if leftover:
+                        yield leftover
+                completed = True
+                break  # Success — exit retry loop
+            except httpx.HTTPError as exc:
+                if attempt < _MAX_RETRIES and "429" in str(exc):
+                    delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning(f"Rate limited. Retrying stream in {delay:.0f}s...")
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error(f"Gemini streaming error: {exc}")
+                if self.history and self.history[-1]["role"] == "user":
+                    self.history.pop()
+                raise RuntimeError(f"Gemini API request failed: {exc}") from exc
+
+        if not completed and self.history and self.history[-1]["role"] == "user":
+            self.history.pop()
 
         if completed:
             complete = "".join(full_response)
-            # Execute any browser actions embedded in the full response
             complete, _ = extract_and_execute_browser_actions(complete)
             self.history.append({"role": "model", "parts": [{"text": complete}]})
             logger.info("Gemini streaming response complete")

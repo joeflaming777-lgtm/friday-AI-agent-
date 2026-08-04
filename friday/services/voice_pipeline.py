@@ -28,6 +28,7 @@ from livekit.rtc import AudioFrame
 from config import AppConfig
 from logger import get_logger
 from utils import audio_frame_to_numpy
+from browser_tools import handle_local_browser_command
 from services.gemini_service import GeminiService
 from services.speech_service import (
     build_http_session,
@@ -613,6 +614,14 @@ class VoicePipeline:
 
             if self._on_user_message:
                 self._on_user_message(text)
+
+            # Step 1.5: Check for local browser commands first (no Gemini needed)
+            local_response = handle_local_browser_command(text)
+            if local_response:
+                if self._on_friday_message:
+                    self._on_friday_message(local_response)
+                await self._speak(local_response)
+                return
 
             # Step 2: Get response from Gemini (streaming)
             full_response: list[str] = []
