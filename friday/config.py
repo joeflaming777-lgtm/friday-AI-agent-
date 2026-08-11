@@ -35,6 +35,17 @@ def _optional_env(key: str, default: str | None = None) -> str | None:
     return os.getenv(key, default)
 
 
+def _optional_float_env(key: str, default: float | None = None) -> float | None:
+    """Get an optional float environment variable, falling back gracefully."""
+    value = os.getenv(key)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class LiveKitConfig:
     """LiveKit server connection configuration."""
@@ -75,6 +86,17 @@ class TTSConfig:
     )
     cartesia_api_key: str | None = field(
         default_factory=lambda: _optional_env("CARTESIA_API_KEY")
+    )
+    # "Katie - Friendly Fixer" — a female Cartesia voice. Change with
+    # CARTESIA_VOICE_ID (browse voices at https://play.cartesia.ai/library).
+    cartesia_voice_id: str | None = field(
+        default_factory=lambda: _optional_env(
+            "CARTESIA_VOICE_ID", "f786b574-daa5-4673-aa0c-cbe3e8534c02"
+        )
+    )
+    # Speech-rate multiplier (sonic-3 accepts 0.6–2.0; higher = faster).
+    cartesia_speed: float | None = field(
+        default_factory=lambda: _optional_float_env("CARTESIA_SPEED", 1.1)
     )
     elevenlabs_api_key: str | None = field(
         default_factory=lambda: _optional_env("ELEVENLABS_API_KEY")

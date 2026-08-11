@@ -45,6 +45,47 @@ logger = get_logger("friday.pipeline")
 #: allowing genuine barge-in a moment later.
 ECHO_GUARD_SECONDS = 0.35
 
+#: Substrings used to recognise a female system voice for the offline
+#: pyttsx3 fallback. Friday should never speak with a male voice.
+_FEMALE_VOICE_MARKERS = (
+    "zira",
+    "aria",
+    "jenny",
+    "hazel",
+    "ava",
+    "emma",
+    "natalie",
+    "michelle",
+    "libby",
+    "ana",
+    "female",
+    "woman",
+    "girl",
+)
+_MALE_VOICE_MARKERS = (
+    "david",
+    "guy",
+    "mark",
+    "george",
+    "male",
+    "man",
+    "steffan",
+)
+
+
+def _pick_female_voice_id(engine: Any) -> str | None:
+    """Return the id of a female system voice, or None if none is found."""
+    try:
+        for voice in engine.getProperty("voices"):
+            name = f"{voice.name} {voice.id}".lower()
+            if any(m in name for m in _FEMALE_VOICE_MARKERS) and not any(
+                m in name for m in _MALE_VOICE_MARKERS
+            ):
+                return voice.id
+    except Exception:
+        pass
+    return None
+
 
 # ── Audio Capture ───────────────────────────────────────────────────────────
 
@@ -412,6 +453,15 @@ class VoicePipeline:
             self._vad = create_vad()
             self._stt = create_stt(self.config.stt, http_session=self._http_session)
             self._tts = create_tts(self.config.tts, http_session=self._http_session)
+
+            # Pre-warm the TTS WebSocket connection so the first reply
+            # doesn't wait for connection setup (lower first-word latency).
+            if self._tts is not None and hasattr(self._tts, "prewarm"):
+                try:
+                    self._tts.prewarm()
+                    logger.debug("Cloud TTS connection pre-warmed")
+                except Exception as exc:
+                    logger.debug(f"TTS prewarm skipped: {exc}")
         except Exception as exc:
             await self._close_http_session()
             logger.error(f"Failed to initialize voice components: {exc}")
@@ -623,21 +673,10 @@ class VoicePipeline:
                 await self._speak(local_response)
                 return
 
-            # Step 2: Get response from Gemini (streaming)
-            full_response: list[str] = []
-            async for chunk in self.gemini.send_message_stream(text):
-                full_response.append(chunk)
-
-            response_text = "".join(full_response).strip()
-            if not response_text:
-                logger.debug("Empty Gemini response")
-                return
-
-            if self._on_friday_message:
-                self._on_friday_message(response_text)
-
-            # Step 3: Speak the response
-            await self._speak(response_text)
+            # Step 2+3: Stream Gemini straight into the TTS so Friday starts
+            # speaking as soon as the first sentence is generated — no waiting
+            # for the whole reply to finish.
+            await self._stream_response(text)
 
         except asyncio.CancelledError:
             logger.debug("Speech processing cancelled")
@@ -647,6 +686,80 @@ class VoicePipeline:
                 self._on_friday_message(
                     "I'm sorry Boss, I couldn't reach my AI service."
                 )
+
+    async def _stream_response(self, user_text: str) -> None:
+        """Generate and speak Friday's reply with minimal latency.
+
+        Gemini text is pushed straight into a live TTS stream as the
+        tokens arrive, so the first words are spoken as soon as the first
+        sentence is ready — no more waiting for the full answer before
+        any sound is heard. Falls back to offline speech if the cloud TTS
+        fails.
+        """
+        spoken = False
+        response_text = ""
+
+        if self._tts is not None and self._playback is not None:
+            stream = self._tts.stream()
+            interrupted = asyncio.Event()
+            text_parts: list[str] = []
+
+            async def _play() -> None:
+                nonlocal spoken
+                try:
+                    async for item in stream:
+                        if self._state.is_speaking or self._state.should_stop:
+                            # User barged in (or we're shutting down)
+                            self._playback.clear()
+                            interrupted.set()
+                            break
+                        self._playback.play_frame(item.frame)
+                        spoken = True
+                        # Suppress VAD echo triggers for our own audio
+                        self._ignore_speech_until = (
+                            time.monotonic() + ECHO_GUARD_SECONDS
+                        )
+                except asyncio.CancelledError:
+                    interrupted.set()
+                except Exception as exc:
+                    logger.error(f"Cloud TTS streaming error: {exc}")
+                    interrupted.set()
+
+            play_task = asyncio.create_task(_play())
+            try:
+                async for chunk in self.gemini.send_message_stream(user_text):
+                    text_parts.append(chunk)
+                    if interrupted.is_set():
+                        # Keep consuming so conversation history is saved,
+                        # but stop sending new text to the voice.
+                        continue
+                    try:
+                        stream.push_text(chunk)
+                    except Exception as exc:
+                        logger.error(f"TTS push error: {exc}")
+                        interrupted.set()
+            finally:
+                if interrupted.is_set():
+                    await stream.aclose()
+                else:
+                    stream.end_input()
+                await asyncio.gather(play_task, return_exceptions=True)
+
+            response_text = "".join(text_parts).strip()
+        else:
+            # No cloud TTS — just gather the reply for display.
+            async for chunk in self.gemini.send_message_stream(user_text):
+                response_text += chunk
+            response_text = response_text.strip()
+
+        if response_text:
+            if self._on_friday_message:
+                self._on_friday_message(response_text)
+        else:
+            logger.debug("Empty Gemini response")
+
+        if not spoken and response_text:
+            await self._speak_local(response_text)
 
     async def _transcribe(self, frames: list[AudioFrame]) -> str | None:
         """Transcribe audio frames to text using STT.
@@ -671,8 +784,8 @@ class VoicePipeline:
     async def _speak(self, text: str) -> None:
         """Synthesize text to speech and play it.
 
-        Uses the configured cloud TTS when available, otherwise
-        falls back to the local pyttsx3 voice engine.
+        Uses the configured cloud TTS when available, otherwise falls back
+        to the local pyttsx3 engine (with a female voice, see ``_speak_local``).
 
         Args:
             text: Text to speak.
@@ -696,19 +809,38 @@ class VoicePipeline:
                 logger.error(f"Cloud TTS synthesis error: {exc}")
 
         if not spoken and text:
-            logger.info("Speaking via local pyttsx3 voice engine...")
-            loop = asyncio.get_event_loop()
+            await self._speak_local(text)
 
-            def _say() -> None:
-                try:
-                    import pyttsx3
-                    engine = pyttsx3.init()
-                    engine.say(text)
-                    engine.runAndWait()
-                except Exception as e:
-                    logger.error(f"pyttsx3 speech error: {e}")
+    async def _speak_local(self, text: str) -> None:
+        """Fallback speech with the local pyttsx3 engine.
 
-            await loop.run_in_executor(None, _say)
+        Picks a female system voice (e.g. Microsoft Zira/Aria/Jenny) so
+        Friday never speaks with the default male Microsoft voice.
+
+        Args:
+            text: Text to speak.
+        """
+        if not text:
+            return
+        logger.warning(
+            "Cloud TTS unavailable — speaking with the local (offline) "
+            "female voice instead."
+        )
+        loop = asyncio.get_event_loop()
+
+        def _say() -> None:
+            try:
+                import pyttsx3
+                engine = pyttsx3.init()
+                voice_id = _pick_female_voice_id(engine)
+                if voice_id:
+                    engine.setProperty("voice", voice_id)
+                engine.say(text)
+                engine.runAndWait()
+            except Exception as exc:
+                logger.error(f"pyttsx3 speech error: {exc}")
+
+        await loop.run_in_executor(None, _say)
 
     # ── Properties ──────────────────────────────────────────────────────
 

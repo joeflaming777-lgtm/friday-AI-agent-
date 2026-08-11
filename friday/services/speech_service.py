@@ -144,9 +144,15 @@ def create_tts(
             )
         from livekit.plugins import cartesia
 
-        logger.info("TTS initialized: Cartesia")
+        logger.info(
+            f"TTS initialized: Cartesia (voice={config.cartesia_voice_id}, "
+            f"speed={config.cartesia_speed})"
+        )
         return cartesia.TTS(
-            api_key=config.cartesia_api_key, http_session=http_session
+            api_key=config.cartesia_api_key,
+            voice=config.cartesia_voice_id,
+            speed=config.cartesia_speed,
+            http_session=http_session,
         )
 
     elif backend == "elevenlabs":
